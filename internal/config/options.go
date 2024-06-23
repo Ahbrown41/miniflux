@@ -86,6 +86,7 @@ const (
 	defaultWatchdog                           = true
 	defaultInvidiousInstance                  = "yewtu.be"
 	defaultWebAuthn                           = false
+	defaultSimilarityThreshold                = 0.4
 )
 
 var defaultHTTPClientUserAgent = "Mozilla/5.0 (compatible; Miniflux/" + version.Version + "; +https://miniflux.app)"
@@ -171,6 +172,7 @@ type Options struct {
 	invidiousInstance                  string
 	mediaProxyPrivateKey               []byte
 	webAuthn                           bool
+	similarityThreshold                float64
 }
 
 // NewOptions returns Options with default values.
@@ -247,6 +249,7 @@ func NewOptions() *Options {
 		invidiousInstance:                  defaultInvidiousInstance,
 		mediaProxyPrivateKey:               crypto.GenerateRandomBytes(16),
 		webAuthn:                           defaultWebAuthn,
+		similarityThreshold:                defaultSimilarityThreshold,
 	}
 }
 
@@ -624,6 +627,11 @@ func (o *Options) WebAuthn() bool {
 	return o.webAuthn
 }
 
+// SimilarityThreshold returns the value of the Similarity Threshold
+func (o *Options) SimilarityThreshold() float64 {
+	return o.similarityThreshold
+}
+
 // FilterEntryMaxAgeDays returns the number of days after which entries should be retained.
 func (o *Options) FilterEntryMaxAgeDays() int {
 	return o.filterEntryMaxAgeDays
@@ -707,6 +715,7 @@ func (o *Options) SortedOptions(redactSecret bool) []*Option {
 		"WORKER_POOL_SIZE":                       o.workerPoolSize,
 		"YOUTUBE_EMBED_URL_OVERRIDE":             o.youTubeEmbedUrlOverride,
 		"WEBAUTHN":                               o.webAuthn,
+		"SIMILARITY_THRESHOLD":                   o.similarityThreshold,
 	}
 
 	keys := make([]string, 0, len(keyValues))

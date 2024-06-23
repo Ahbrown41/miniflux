@@ -32,6 +32,7 @@ const (
 	flagHealthCheckHelp     = `Perform a health check on the given endpoint (the value "auto" try to guess the health check endpoint).`
 	flagRefreshFeedsHelp    = "Refresh a batch of feeds and exit"
 	flagRunCleanupTasksHelp = "Run cleanup tasks (delete old sessions and archives old entries)"
+	flagRunSimilarityHelp   = "Calculate similarity between articles"
 	flagExportUserFeedsHelp = "Export user feeds (provide the username as argument)"
 )
 
@@ -52,6 +53,7 @@ func Parse() {
 		flagHealthCheck     string
 		flagRefreshFeeds    bool
 		flagRunCleanupTasks bool
+		flagRunSimilarity   bool
 		flagExportUserFeeds string
 	)
 
@@ -65,12 +67,13 @@ func Parse() {
 	flag.BoolVar(&flagResetPassword, "reset-password", false, flagResetPasswordHelp)
 	flag.BoolVar(&flagResetFeedErrors, "reset-feed-errors", false, flagResetFeedErrorsHelp)
 	flag.BoolVar(&flagDebugMode, "debug", false, flagDebugModeHelp)
-	flag.StringVar(&flagConfigFile, "config-file", "", flagConfigFileHelp)
+	flag.StringVar(&flagConfigFile, "config-file", "./.env", flagConfigFileHelp)
 	flag.StringVar(&flagConfigFile, "c", "", flagConfigFileHelp)
 	flag.BoolVar(&flagConfigDump, "config-dump", false, flagConfigDumpHelp)
 	flag.StringVar(&flagHealthCheck, "healthcheck", "", flagHealthCheckHelp)
 	flag.BoolVar(&flagRefreshFeeds, "refresh-feeds", false, flagRefreshFeedsHelp)
 	flag.BoolVar(&flagRunCleanupTasks, "run-cleanup-tasks", false, flagRunCleanupTasksHelp)
+	flag.BoolVar(&flagRunSimilarity, "calc-similarity", false, flagRunSimilarityHelp)
 	flag.StringVar(&flagExportUserFeeds, "export-user-feeds", "", flagExportUserFeedsHelp)
 	flag.Parse()
 
@@ -176,7 +179,9 @@ func Parse() {
 	}
 
 	if flagResetFeedErrors {
-		store.ResetFeedErrors()
+		if err := store.ResetFeedErrors(); err != nil {
+			printErrorAndExit(err)
+		}
 		return
 	}
 
@@ -225,10 +230,15 @@ func Parse() {
 		return
 	}
 
+	if flagRunSimilarity {
+		calcSimilarity(store, config.Opts.SimilarityThreshold())
+		return
+	}
+
 	startDaemon(store)
 }
 
 func printErrorAndExit(err error) {
-	fmt.Fprintf(os.Stderr, "%v\n", err)
+	_, _ = fmt.Fprintf(os.Stderr, "%v\n", err)
 	os.Exit(1)
 }

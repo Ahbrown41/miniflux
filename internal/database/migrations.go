@@ -903,4 +903,17 @@ var migrations = []func(tx *sql.Tx) error{
 		_, err = tx.Exec(sql)
 		return err
 	},
+	func(tx *sql.Tx) (err error) {
+		sql := `CREATE TABLE entry_similar (
+    				entry_id bigint not null, 
+					similar_entry_id bigint not null,
+					similarity float8,
+					primary key (entry_id, similar_entry_id),
+					unique (entry_id, similar_entry_id),
+					foreign key (entry_id) references entries (id) on delete cascade,
+					foreign key (similar_entry_id) references entries (id) on delete cascade
+                 )`
+		_, err = tx.Exec(sql)
+		return err
+	},
 }
