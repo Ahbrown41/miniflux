@@ -256,8 +256,7 @@ func (e *EntryQueryBuilder) GetEntry() (*model.Entry, error) {
 	return entries[0], nil
 }
 
-// GetEntries returns a list of entries that match the condition.
-func (e *EntryQueryBuilder) GetEntries() (model.Entries, error) {
+func (e *EntryQueryBuilder) EntryProcessor(proc func(entry *model.Entry) error) error {
 	query := `
 		SELECT
 			e.id,
@@ -314,11 +313,10 @@ func (e *EntryQueryBuilder) GetEntries() (model.Entries, error) {
 
 	rows, err := e.store.db.Query(query, e.args...)
 	if err != nil {
-		return nil, fmt.Errorf("store: unable to get entries: %v", err)
+		return fmt.Errorf("store: unable to get entries: %v", err)
 	}
 	defer rows.Close()
 
-	entries := make(model.Entries, 0)
 	for rows.Next() {
 		var iconID sql.NullInt64
 		var tz string
@@ -365,13 +363,13 @@ func (e *EntryQueryBuilder) GetEntries() (model.Entries, error) {
 		)
 
 		if err != nil {
-			return nil, fmt.Errorf("store: unable to fetch entry row: %v", err)
+			return fmt.Errorf("store: unable to fetch entry row: %v", err)
 		}
 
 		if hasEnclosure.Valid && hasEnclosure.Bool && e.fetchEnclosures {
 			entry.Enclosures, err = e.store.GetEnclosures(entry.ID)
 			if err != nil {
-				return nil, fmt.Errorf("store: unable to fetch enclosures for entry #%d: %w", entry.ID, err)
+				return fmt.Errorf("store: unable to fetch enclosures for entry #%d: %w", entry.ID, err)
 			}
 		}
 
@@ -391,9 +389,22 @@ func (e *EntryQueryBuilder) GetEntries() (model.Entries, error) {
 		entry.Feed.UserID = entry.UserID
 		entry.Feed.Icon.FeedID = entry.FeedID
 		entry.Feed.Category.UserID = entry.UserID
-		entries = append(entries, entry)
-	}
 
+		err = proc(entry)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// GetEntries returns a list of entries that match the condition.
+func (e *EntryQueryBuilder) GetEntries() (model.Entries, error) {
+	entries := make(model.Entries, 0)
+	e.EntryProcessor(func(entry *model.Entry) error {
+		entries = append(entries, entry)
+		return nil
+	})
 	return entries, nil
 }
 

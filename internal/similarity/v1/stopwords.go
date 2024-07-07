@@ -1,4 +1,4 @@
-package similarity
+package v1
 
 var stopwords = map[string]bool{
 	"a": true, "about": true, "above": true, "after": true, "again": true, "against": true,

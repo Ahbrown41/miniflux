@@ -2,6 +2,7 @@ package cli
 
 import (
 	"log/slog"
+	"miniflux.app/v2/internal/model"
 	"miniflux.app/v2/internal/similarity"
 	"miniflux.app/v2/internal/storage"
 )
@@ -17,35 +18,41 @@ func calcSimilarity(store *storage.Storage, similarityThreshold float64) error {
 	}
 	for _, user := range users {
 		slog.Debug("Processing user", slog.Int64("userID", user.ID))
-		// Get all feeds for the user
-		feeds, err := store.Feeds(user.ID)
+		// Calculate Similar
+		builder := store.NewEntryQueryBuilder(user.ID)
+		stories, err := similarity.NewSimilarity(similarityThreshold).Calculate(builder)
 		if err != nil {
 			printErrorAndExit(err)
 		}
-		for _, feed := range feeds {
-			slog.Debug("Processing feed", slog.Int64("feedID", feed.ID))
-			// Get all entries for the feed
-			builder := store.NewEntryQueryBuilder(user.ID)
-			builder.WithFeedID(feed.ID)
-			entries, err := builder.GetEntries()
-			if err != nil {
-				printErrorAndExit(err)
-			}
-			sim := similarity.NewSimilarity(similarityThreshold)
-			similars, err := sim.CalculateSimilarity(entries)
-			if err != nil {
-				printErrorAndExit(err)
-			}
-			// Create similar entries
-			for _, similar := range similars {
-				slog.Debug("Found Similar",
-					slog.Int64("entryID", similar.EntryID),
-					slog.Int64("similarEntryID", similar.SimilarEntryID),
-					slog.Float64("similarity", similar.Similarity),
-				)
-				err := store.CreateSimilarEntry(similar)
+
+		// Create similar entries
+		for _, story := range stories {
+			for _, similar := range story.Similar {
+				sims, err := store.FindSimilarEntries(story.ID)
 				if err != nil {
 					return err
+				}
+				found := false
+				for _, sim := range sims {
+					if sim.EntryID == story.ID {
+						found = true
+						slog.Debug("Found existing similar story", slog.Int64("storyID", story.ID))
+					}
+				}
+				if !found {
+					slog.Debug("Found new similar",
+						slog.Int64("entryID", story.ID),
+						slog.Int64("similarEntryID", similar.Source.ID),
+						slog.Float64("similarity", similar.Similarity),
+					)
+					err := store.CreateSimilarEntry(&model.EntrySimilar{
+						EntryID:        story.ID,
+						SimilarEntryID: similar.Source.ID,
+						Similarity:     similar.Similarity,
+					})
+					if err != nil {
+						return err
+					}
 				}
 			}
 		}

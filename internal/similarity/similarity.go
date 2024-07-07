@@ -1,192 +1,112 @@
 package similarity
 
 import (
-	"github.com/jdkato/prose/v2"
-	"gonum.org/v1/gonum/floats"
-	"log"
+	"fmt"
 	"log/slog"
-	"math"
 	"miniflux.app/v2/internal/model"
-	"regexp"
-	"strings"
+	"miniflux.app/v2/internal/similarity/pool"
+	"miniflux.app/v2/internal/similarity/story"
+	"miniflux.app/v2/internal/similarity/v2"
+	"miniflux.app/v2/internal/storage"
+	"time"
 )
 
-type Story struct {
-	ID          int64
-	Title       string
-	Link        string
-	Description string
-	Content     string
-	Similar     []*Similar
-}
-
-type Similar struct {
-	Source     *Story
-	Similarity float64
-}
-
-type similarity struct {
+type calculateSimilarity struct {
 	threshold float64
 }
 
 type Similarity interface {
-	CalculateSimilarity(items model.Entries) ([]*model.EntrySimilar, error)
+	Calculate(builder *storage.EntryQueryBuilder) ([]*story.Story, error)
 }
 
 // NewSimilarity returns a new similarity.
 func NewSimilarity(threshold float64) Similarity {
-	return &similarity{threshold: threshold}
+	return &calculateSimilarity{threshold: threshold}
 }
 
-// CalculateSimilarity calculates the similarity between a list of entries.
-func (s *similarity) CalculateSimilarity(items model.Entries) ([]*model.EntrySimilar, error) {
-	stories := s.extractStories(items)
-	tfidf, uniqueTokens := s.computeTFIDF(stories)
-	groups := s.groupSimilarStories(stories, tfidf, uniqueTokens, s.threshold) // Increased threshold for better accuracy
-	entrySimilars := make([]*model.EntrySimilar, 0)
-
-	for i, stories := range groups {
-		slog.Debug("Group", slog.Int("group", i+1), slog.Int("stories", len(stories)))
-		for _, story := range stories {
-			for _, similar := range story.Similar {
-				if story.ID == similar.Source.ID {
-					continue
-				}
-				entrySimilars = append(entrySimilars, &model.EntrySimilar{
-					EntryID:        story.ID,
-					SimilarEntryID: similar.Source.ID,
-					Similarity:     similar.Similarity,
-				})
-				slog.Debug("Creating Simularity", slog.String("link", story.Link), slog.String("link", similar.Source.Link), slog.Float64("similarity", similar.Similarity))
+// processor - Process a given loop of all stories minus the offset
+func (s *calculateSimilarity) processor(builder *storage.EntryQueryBuilder, offset int) func(story1 *story.Story) (*story.Story, error) {
+	return func(story1 *story.Story) (*story.Story, error) {
+		subStart := time.Now()
+		iterations := 0
+		builder.WithOffset(offset)
+		comp := v2.NewComparator()
+		err := builder.EntryProcessor(func(entry2 *model.Entry) error {
+			story2 := story.FromEntry(entry2)
+			sim, err := comp.Compare(story1.Content, story2.Content)
+			if err != nil {
+				return err
 			}
-		}
-	}
-	return entrySimilars, nil
-}
-
-// removeHTMLTags removes HTML tags from a string
-func (s *similarity) removeHTMLTags(text string) string {
-	re := regexp.MustCompile("<[^>]*>")
-	return re.ReplaceAllString(text, "")
-}
-
-// PreprocessText removes non-word characters, HTML tags, and lowercases the text
-func (s *similarity) preprocessText(text string) string {
-	text = s.removeHTMLTags(text)
-	re := regexp.MustCompile(`[\W_]+`)
-	text = re.ReplaceAllString(text, " ")
-	return strings.ToLower(text)
-}
-
-func (s *similarity) extractStories(items []*model.Entry) []*Story {
-	stories := []*Story{}
-	for _, item := range items {
-		content := s.preprocessText(item.Title + " " + item.Content)
-		stories = append(stories, &Story{
-			ID:          item.ID,
-			Title:       item.Title,
-			Link:        item.URL,
-			Description: item.Content,
-			Content:     content,
+			if sim >= s.threshold {
+				story1.Similar = append(story1.Similar, &story.Similar{
+					Source:     story2,
+					Similarity: sim,
+				})
+			}
+			iterations++
+			return nil
 		})
+		if err != nil {
+			return nil, err
+		}
+		slog.Debug("Processed stories",
+			slog.Int("offset", offset),
+			slog.Int("iterations", iterations),
+			slog.String("Duration", fmt.Sprintf("%s", time.Since(subStart))))
+		return story1, nil
 	}
-	return stories
 }
 
-func (s *similarity) tokenize(text string) []string {
-	doc, err := prose.NewDocument(text)
+// Calculate calculates the similarity between entries.
+func (s *calculateSimilarity) Calculate(builder *storage.EntryQueryBuilder) ([]*story.Story, error) {
+	threadPool := pool.NewThreadPool[*story.Story, *story.Story](5, 200)
+	threadPool.Start()
+	builder.WithSorting("id", "asc")
+	offset := 1
+	count, err := builder.CountEntries()
 	if err != nil {
-		log.Fatalf("Failed to tokenize text: %v", err)
+		return nil, err
 	}
-	tokens := []string{}
-	for _, tok := range doc.Tokens() {
-		normalized := strings.ToLower(tok.Text)
-		if _, found := stopwords[normalized]; !found {
-			tokens = append(tokens, normalized)
-		}
+	if count == 0 {
+		return nil, nil
 	}
-	return tokens
-}
+	slog.Debug("Total entries", slog.Int("count", count))
 
-func (s *similarity) computeTFIDF(stories []*Story) (map[string]map[string]float64, []string) {
-	tf := make(map[string]map[string]float64)
-	df := make(map[string]int)
-	tokensPerStory := make(map[string][]string)
-	for _, story := range stories {
-		tokens := s.tokenize(story.Content)
-		tokensPerStory[story.Link] = tokens
-		tf[story.Link] = make(map[string]float64)
-		for _, token := range tokens {
-			tf[story.Link][token]++
+	err = builder.EntryProcessor(func(entry1 *model.Entry) error {
+		thisBuilder := builder
+		slog.Debug("Processing entry",
+			slog.Int64("EntryID", entry1.ID),
+			slog.Int("Offset", offset))
+		threadPool.TaskQueue <- pool.Task[*story.Story, *story.Story]{
+			ID:       offset,
+			Data:     story.FromEntry(entry1),
+			Function: s.processor(thisBuilder, offset),
 		}
-		for token := range tf[story.Link] {
-			df[token]++
-		}
+		offset++
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	idf := make(map[string]float64)
-	for token, count := range df {
-		idf[token] = math.Log(float64(len(stories)) / float64(count))
-	}
-	tfidf := make(map[string]map[string]float64)
-	for link, tfs := range tf {
-		tfidf[link] = make(map[string]float64)
-		for token, freq := range tfs {
-			tfidf[link][token] = freq * idf[token]
-		}
-	}
-	uniqueTokens := make([]string, 0, len(df))
-	for token := range df {
-		uniqueTokens = append(uniqueTokens, token)
-	}
-	return tfidf, uniqueTokens
-}
 
-func (s *similarity) cosineSimilarity(vecA, vecB []float64) float64 {
-	return floats.Dot(vecA, vecB) / (math.Sqrt(floats.Dot(vecA, vecA)) * math.Sqrt(floats.Dot(vecB, vecB)))
-}
-
-func (s *similarity) compareStories(storyA, storyB *Story, tfidf map[string]map[string]float64, uniqueTokens []string) float64 {
-	vecA := make([]float64, len(uniqueTokens))
-	vecB := make([]float64, len(uniqueTokens))
-	for i, token := range uniqueTokens {
-		vecA[i] = tfidf[storyA.Link][token]
-		vecB[i] = tfidf[storyB.Link][token]
-	}
-	return s.cosineSimilarity(vecA, vecB)
-}
-
-func (s *similarity) groupSimilarStories(stories []*Story, tfidf map[string]map[string]float64, uniqueTokens []string, threshold float64) [][]*Story {
-	groups := [][]*Story{}
-	visited := make(map[string]bool)
-
-	for _, story := range stories {
-		if visited[story.Link] {
-			continue
-		}
-		group := []*Story{story}
-		visited[story.Link] = true
-		for _, otherStory := range stories {
-			if visited[otherStory.Link] {
-				continue
-			}
-			similarity := s.compareStories(story, otherStory, tfidf, uniqueTokens)
-			//slog.Debug("Comparing stories vs threshold",
-			//	slog.String("story1", story.Title),
-			//	slog.String("story2", otherStory.Title),
-			//	slog.Float64("similarity", similarity),
-			//)
-			if similarity >= threshold {
-				story.Similar = append(story.Similar, &Similar{
-					Source:     otherStory,
-					Similarity: similarity,
-				})
-				group = append(group, otherStory)
-				visited[otherStory.Link] = true
+	// Collect results.
+	stories := []*story.Story{}
+	go func() {
+		for result := range threadPool.ResultChan {
+			if len(result.Value.Similar) > 0 {
+				stories = append(stories, result.Value)
 			}
 		}
-		if len(group) > 1 { // Only add groups with multiple stories
-			groups = append(groups, group)
+	}()
+
+	// Collect errors.
+	go func() {
+		for err := range threadPool.ErrChan {
+			fmt.Printf("Error: %v\n", err)
 		}
-	}
-	return groups
+	}()
+
+	// Stop the thread pool after processing.
+	threadPool.Stop()
+	return stories, nil
 }
